@@ -1,0 +1,466 @@
+// Pikuu - Schema Prisma completo
+// Sistema de créditos pay-per-generation con free tier
+
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider     = "postgresql"
+  relationMode = "prisma"
+}
+
+// ============================================
+// AUTENTICACIÓN Y USUARIOS
+// ============================================
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+model User {
+  id            String   @id
+  name          String
+  email         String
+  emailVerified Boolean  @default(false)
+  image         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  role UserRole @default(USER)
+
+  // Relaciones
+  sessions      Session[]
+  accounts      Account[]
+  creditBalance CreditBalance?
+  transactions  CreditTransaction[]
+  purchases     CreditPurchase[]
+  chats         Chat[]
+  usageLogs     UsageLog[]
+
+  @@unique([email])
+  @@map("user")
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([token])
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+}
+
+// ============================================
+// SISTEMA DE CRÉDITOS Y BILLING
+// ============================================
+
+model CreditBalance {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Balance actual
+  totalCredits Int @default(0) // Total de créditos disponibles
+  usedCredits  Int @default(0) // Créditos ya consumidos
+  freeCredits  Int @default(3) // Créditos free tier (resetea cada mes o permanente)
+  paidCredits  Int @default(0) // Créditos comprados
+
+  // Control de free tier
+  freeCreditsUsed    Int       @default(0) // Cuántos del free tier usó
+  freeCreditsResetAt DateTime? // Cuándo resetearon los free credits
+
+  // Metadata
+  lastPurchaseAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("credit_balance")
+}
+
+model CreditPurchase {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Detalles de la compra
+  packageType    String // "starter" | "pro" | "power"
+  creditsAmount  Int // Cantidad de créditos comprados
+  priceUsd       Decimal @db.Decimal(10, 2) // Precio pagado en USD
+  pricePerCredit Decimal @db.Decimal(10, 4) // Precio unitario
+
+  // Payment
+  polarCheckoutId String? @unique
+  polarOrderId    String? @unique
+  paymentStatus   String  @default("pending") // pending | completed | failed | refunded
+
+  // Metadata
+  metadata    Json? // Info adicional (promociones, referrals, etc)
+  purchasedAt DateTime  @default(now())
+  expiresAt   DateTime? // null = nunca expiran
+
+  @@index([userId])
+  @@index([polarCheckoutId])
+  @@index([paymentStatus])
+  @@map("credit_purchase")
+}
+
+model CreditTransaction {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Tipo de transacción
+  type   String // "generation" | "purchase" | "refund" | "bonus" | "adjustment"
+  amount Int // Positivo = agregado, Negativo = consumido
+
+  // Contexto
+  projectId      String? // Si fue una generación
+  operationType  OperationType? // "full_project" | "partial_update" | "iteration"
+  creditsCharged Int? // Créditos cobrados por esta operación
+
+  // Referencias
+  purchaseId    String? // Si vino de una compra
+  relatedEntity String? // ID del ProjectState, ChatMessage, etc
+
+  // Metadata
+  description String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([type])
+  @@index([createdAt])
+  @@map("credit_transaction")
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum OperationType {
+  FULL_PROJECT
+  ADD_MODEL
+  MODIFY_SECTION
+  ITERATE
+}
+
+// ============================================
+// CHAT/PROJECT - Cada chat es un proyecto
+// ============================================
+
+enum CrudStrategy {
+  actions
+  routes
+}
+
+model Chat {
+  id           String       @id @default(cuid())
+  userId       String       @map("user_id")
+  name         String? // Nombre del proyecto (opcional, se puede generar)
+  crudStrategy CrudStrategy @default(actions) @map("crud_strategy")
+  prismaSchema String?      @map("prisma_schema")
+  zodSchemas   Json         @default("{}") @map("zod_schemas")
+  actions      Json         @default("{}")
+  routes       Json         @default("{}")
+  forms        Json         @default("{}")
+  workflow     Json?
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages  Message[]
+  usageLogs UsageLog[]
+
+  @@index([userId])
+  @@index([userId, updatedAt])
+  @@map("chats")
+}
+
+// ============================================
+// MESSAGE - Mensajes del chat
+// ============================================
+
+model Message {
+  id        String   @id @default(cuid())
+  chatId    String   @map("chat_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  role      String
+
+  chat  Chat   @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  parts Part[]
+
+  @@index([chatId])
+  @@index([chatId, createdAt])
+  @@map("messages")
+}
+
+// ============================================
+// PART - Partes de cada mensaje
+// ============================================
+
+model Part {
+  id        String   @id @default(cuid())
+  messageId String   @map("message_id")
+  type      String
+  createdAt DateTime @default(now()) @map("created_at")
+  order     Int      @default(0)
+
+  // Text fields
+  text_text String? @map("text_text")
+
+  // Reasoning fields
+  reasoning_text String? @map("reasoning_text")
+
+  // File fields
+  file_mediaType String? @map("file_mediaType")
+  file_filename  String? @map("file_filename")
+  file_url       String? @map("file_url")
+
+  // Source url fields
+  source_url_sourceId String? @map("source_url_sourceId")
+  source_url_url      String? @map("source_url_url")
+  source_url_title    String? @map("source_url_title")
+
+  // Source document fields
+  source_document_sourceId  String? @map("source_document_sourceId")
+  source_document_mediaType String? @map("source_document_mediaType")
+  source_document_title     String? @map("source_document_title")
+  source_document_filename  String? @map("source_document_filename")
+
+  // Shared tool call columns
+  tool_toolCallId String? @map("tool_toolCallId")
+  tool_state      String? @map("tool_state")
+  tool_errorText  String? @map("tool_errorText")
+
+  // Pikuu-specific tools
+  tool_generatePrisma_input  Json? @map("tool_generatePrisma_input")
+  tool_generatePrisma_output Json? @map("tool_generatePrisma_output")
+
+  tool_generateZod_input  Json? @map("tool_generateZod_input")
+  tool_generateZod_output Json? @map("tool_generateZod_output")
+
+  tool_generateCrud_input  Json? @map("tool_generateCrud_input")
+  tool_generateCrud_output Json? @map("tool_generateCrud_output")
+
+  tool_generateForms_input  Json? @map("tool_generateForms_input")
+  tool_generateForms_output Json? @map("tool_generateForms_output")
+
+  tool_generateWorkflow_input  Json? @map("tool_generateWorkflow_input")
+  tool_generateWorkflow_output Json? @map("tool_generateWorkflow_output")
+
+  // Data parts for artifacts
+  data_artifact_id           String?  @default(cuid()) @map("data_artifact_id")
+  data_artifact_name         String?  @map("data_artifact_name")
+  data_artifact_type         String?  @map("data_artifact_type")
+  data_artifact_filePath     String?  @map("data_artifact_filePath")
+  data_artifact_code         String?  @map("data_artifact_code")
+  data_artifact_previousCode String?  @map("data_artifact_previousCode")
+  data_artifact_diff         String?  @map("data_artifact_diff")
+  data_artifact_isNew        Boolean? @map("data_artifact_isNew")
+
+  providerMetadata Json? @map("providerMetadata")
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@index([messageId, order])
+  @@map("parts")
+}
+
+// ============================================
+// ANALYTICS Y USAGE TRACKING
+// ============================================
+
+model UsageLog {
+  id     String  @id @default(cuid())
+  userId String  @map("user_id")
+  chatId String? @map("chat_id") // Ahora referencia a Chat en lugar de Project
+
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chat Chat? @relation(fields: [chatId], references: [id], onDelete: Cascade)
+
+  // Tipo de operación
+  operationType OperationType @map("operation_type") // "full_project" | "add_model" | "modify_form" | "iterate"
+  toolsExecuted Json          @map("tools_executed") // Lista de tools: ["generatePrisma", "generateZod"]
+
+  // Costos
+  creditsCharged Int     @map("credits_charged")
+  aiCostUsd      Decimal @map("ai_cost_usd") @db.Decimal(10, 6) // Costo real en la API
+
+  // Performance
+  durationMs Int?  @map("duration_ms") // Tiempo de ejecución en milisegundos
+  tokenUsage Json? @map("token_usage") // { input: number, output: number, cached: number }
+
+  // Metadata
+  intent       String? // "create_project" | "update_project" | "iterate_project"
+  success      Boolean @default(true)
+  errorMessage String? @map("error_message") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([chatId])
+  @@index([operationType])
+  @@index([createdAt])
+  @@index([userId, createdAt]) // Para queries de historial de usuario
+  @@map("usage_logs")
+}
+
+// ============================================
+// PRICING CONFIGS (Para facilitar updates)
+// ============================================
+
+model PricingConfig {
+  id String @id @default(cuid())
+
+  // Package configs
+  packageType     String  @unique // "starter" | "pro" | "power"
+  polarProductId  String? @unique
+  creditsAmount   Int
+  priceUsd        Decimal @db.Decimal(10, 2)
+  pricePerCredit  Decimal @db.Decimal(10, 4)
+  discountPercent Int     @default(0)
+
+  // Display
+  displayName String
+  description String?
+  isPopular   Boolean @default(false)
+  sortOrder   Int     @default(0)
+
+  // Status
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("pricing_config")
+}
+
+model CreditCost {
+  id String @id @default(cuid())
+
+  // Tipo de operación
+  operationType   OperationType @unique // "full_project" | "add_model" | "modify_section" etc
+  creditsRequired Int
+
+  // Descripción
+  displayName String
+  description String?
+
+  // Status
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("credit_cost")
+}
+
+// ============================================
+// REFERRALS Y PROMOCIONES (Opcional - Fase 2)
+// ============================================
+
+model Referral {
+  id String @id @default(cuid())
+
+  referrerId     String // User que refiere
+  referredEmail  String // Email del referido
+  referredUserId String? // Se llena cuando el referido se registra
+
+  // Rewards
+  referrerBonus Int @default(20) // Créditos para quien refiere
+  referredBonus Int @default(20) // Créditos para el referido
+
+  // Status
+  status      String    @default("pending") // pending | completed | expired
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@index([referrerId])
+  @@index([referredEmail])
+  @@index([status])
+  @@map("referral")
+}
+
+// ============================================
+// ANALYTICS AGREGADOS (Para dashboard admin)
+// ============================================
+
+model DailyMetrics {
+  id   String   @id @default(cuid())
+  date DateTime @unique
+
+  // User metrics
+  newUsers    Int @default(0)
+  activeUsers Int @default(0)
+  paidUsers   Int @default(0)
+
+  // Revenue metrics
+  totalRevenue     Decimal @default(0) @db.Decimal(10, 2)
+  starterPackSales Int     @default(0)
+  proPackSales     Int     @default(0)
+  powerPackSales   Int     @default(0)
+
+  // Usage metrics
+  projectsCreated  Int @default(0)
+  totalGenerations Int @default(0)
+  creditsConsumed  Int @default(0)
+  creditsPurchased Int @default(0)
+
+  // AI costs
+  totalAiCostUsd Decimal @default(0) @db.Decimal(10, 6)
+
+  // Conversion
+  freeToFirstPurchase Int @default(0) // Usuarios que compraron por primera vez
+
+  createdAt DateTime @default(now())
+
+  @@index([date])
+  @@map("daily_metrics")
+}
